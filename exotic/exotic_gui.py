@@ -141,29 +141,29 @@ def main():
     tk.Label(root,
              text="Welcome to EXOTIC!",
              justify=tk.LEFT,
-             font=("Arial", 36),
+             font=("Times New Roman", 36),
              padx=20).pack(anchor=tk.CENTER)
     tk.Label(root,
              text="the EXOplanet Transit Interpretation Code",
              justify=tk.LEFT,
-             font=("Arial", 22),
+             font=("Times New Roman", 22),
              padx=20).pack(anchor=tk.CENTER)
     tk.Label(root,
              text=f"Version {__version__}",
-             justify=tk.LEFT,
+             justify=tk.LEFT, font=("Times New Roman", 10),
              padx=20).pack(anchor=tk.CENTER)
 
     tk.Label(root,
              text="Copyright (c) 2021, California Institute of Technology. "
                   "All rights reserved.\nBased on Government Sponsored Research "
                   "under contracts NNN12AA01C, NAS7-1407 and/or NAS7-03001.",
-             font=("Arial", 12),
+             font=("Times New Roman", 12),
              justify=tk.CENTER,
              padx=20).pack(anchor=tk.CENTER)
 
     # Button for closing
     exit_button = tk.Button(root, text="Next", command=root.destroy)
-    exit_button.pack(anchor=tk.CENTER)
+    exit_button.pack(anchor=tk.CENTER, pady=15)
 
     root.mainloop()
 
@@ -175,7 +175,7 @@ def main():
     tk.Label(root,
              text="\nHow would you like to run EXOTIC?",
              justify=tk.LEFT,
-             font="Helvetica 14 bold",
+             font=("Times New Roman", 20),
              padx=20).pack(anchor=tk.W)
 
     tk.Radiobutton(root,
@@ -195,7 +195,7 @@ def main():
 
     # Button for closing
     exit_button = tk.Button(root, text="Next", command=root.destroy)
-    exit_button.pack(anchor=tk.E)
+    exit_button.pack(anchor=tk.CENTER, pady=15)
 
     root.mainloop()
 
