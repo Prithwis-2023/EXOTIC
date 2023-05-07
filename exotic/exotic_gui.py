@@ -181,6 +181,7 @@ def main():
     tk.Radiobutton(root,
                    text="Real Time Reduction\n(for quickly analyzing your data while simultaneously observing)",
                    justify=tk.LEFT,
+                   font=("Times New Roman", 12),
                    padx=20,
                    variable=reduction_opt,
                    value=1).pack(anchor=tk.W)
@@ -188,6 +189,7 @@ def main():
     tk.Radiobutton(root,
                    text="Complete Reduction\n(for analyzing your data after an observing run)",
                    justify=tk.LEFT,
+                   font=("Times New Roman", 12),
                    padx=20,
                    variable=reduction_opt,
                    value=2).pack(anchor=tk.W)
@@ -212,11 +214,12 @@ def main():
         tk.Label(root,
                  text="""How would you like to input your observing information?""",
                  justify=tk.LEFT,
-                 font="Helvetica 14 bold",
+                 font=("Times New Roman", 20),
                  padx=20).pack()
 
         tk.Radiobutton(root,
                        text="Manually (Recommended for first-time users)",
+                       font=("Times New Roman", 12),
                        padx=20,
                        variable=obsinfo,
                        value="manual").pack(anchor=tk.W)
@@ -224,28 +227,30 @@ def main():
 
         tk.Radiobutton(root,
                        text="From a pre-existing input file (e.g. inits.json) - for advanced users",
+                       font=("Times New Roman", 12),
                        padx=20,
                        variable=obsinfo,
                        value='inits').pack(anchor=tk.W)
 
         # Button for closing
         exit_button = tk.Button(root, text="Next", command=root.destroy)
-        exit_button.pack(pady=20, anchor=tk.E)
+        exit_button.pack(anchor=tk.CENTER, pady=20)
 
         root.mainloop()
 
         if obsinfo.get() == "manual":
             root=tk.Tk() 
+            #scroll_bar = tk.Scrollbar(root)
             root.protocol("WM_DELETE_WINDOW", exit)
             root.title(f"EXOTIC v{__version__}")
 
             window_label = tk.Label(root,
                                     text="""Please enter the following information about your observation:""",
-                                    font="Helvetica 14 bold",
+                                    font=("Times New Roman", 20),
                                     justify=tk.CENTER,
                                     padx=20)  # .pack()
             window_label.grid(row=0, column=0, sticky=tk.N, pady=6)
-
+            
             # Set up rows + columns
             i = 1
             j = 0
