@@ -83,7 +83,7 @@ def display_image(filename):
     # must give a vector of image data for image parameter
     fig.image(
         image=[data],
-          x=10, y=0, dw=hdu[extension].data.shape[1], dh=hdu[extension].data.shape[0],
+          x=0, y=0, dw=hdu[extension].data.shape[1], dh=hdu[extension].data.shape[0],
           level="image", color_mapper=color_mapper
     )
     fig.grid.grid_line_width = 0.5
