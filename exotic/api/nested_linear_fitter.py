@@ -35,27 +35,29 @@
 #    EXOplanet Transit Interpretation Code (EXOTIC)
 #    # NOTE: See companion file version.py for version info.
 # ########################################################################### #
-# ########################################################################### #
-# Various functions for fitting a linear model to data, including nested 
+# Various functions for fitting a linear model to data, including nested
 # sampling, linear least squares. Includes residual plotting, posteriors and 
 # a periodogram analysis.
 # 
 # ########################################################################### #
-
-import copy
 import numpy as np
 from itertools import cycle
 import statsmodels.api as sm
-import pandas.util.testing as tm
 import matplotlib.pyplot as plt
-from exotic.api.plotting import corner
-from ultranest import ReactiveNestedSampler
 from astropy.timeseries import LombScargle
+try:
+    from ultranest import ReactiveNestedSampler
+except ImportError:
+    print("Warning: ultranest not installed. Nested sampling will not work.")
 
+try:
+    from plotting import corner
+except ImportError:
+    from .plotting import corner
 
 class linear_fitter(object):
 
-    def __init__(self, data, dataerr, bounds=None, prior=None):
+    def __init__(self, data, dataerr, bounds=None, prior=None, labels=None, verbose=True):
         """
         Fit a linear model to data using nested sampling.
 
@@ -73,13 +75,16 @@ class linear_fitter(object):
         self.data = data
         self.dataerr = dataerr
         self.bounds = bounds
-        self.prior = prior.copy() # dict {'m':(0.1,0.5), 'b':(0,1)}
+        self.labels = np.array(labels)
+        self.prior = prior.copy()  # dict {'m':(0.1,0.5), 'b':(0,1)}
+        self.verbose = verbose
         if bounds is None:
             # use +- 3 sigma prior as bounds
             self.bounds = {
-                'm':[prior['m'][0]-3*prior['m'][1],prior['m'][0]+3*prior['m'][1]],
-                'b':[prior['b'][0]-3*prior['b'][1],prior['b'][0]+3*prior['b'][1]]
+                'm': [prior['m'][0] - 3 * prior['m'][1], prior['m'][0] + 3 * prior['m'][1]],
+                'b': [prior['b'][0] - 3 * prior['b'][1], prior['b'][0] + 3 * prior['b'][1]]
             }
+        self.results = None
         self.fit_nested()
 
     def fit_nested(self):
@@ -87,21 +92,29 @@ class linear_fitter(object):
 
         freekeys = list(self.bounds.keys())
         boundarray = np.array([self.bounds[k] for k in freekeys])
-        bounddiff = np.diff(boundarray,1).reshape(-1)
-        self.epochs = np.round((self.data - np.mean(self.bounds['b']))/np.mean(self.bounds['m']))
+        bounddiff = np.diff(boundarray, 1).reshape(-1)
+        self.epochs = np.round((self.data - np.mean(self.bounds['b'])) / np.mean(self.bounds['m']))
 
         def loglike(pars):
             # chi-squared
-            model = pars[0]*self.epochs + pars[1]
-            return -0.5 * np.sum( ((self.data-model)/self.dataerr)**2 )
-        
+            model = pars[0] * self.epochs + pars[1]
+            return -0.5 * np.sum(((self.data - model) / self.dataerr) ** 2)
+
         def prior_transform(upars):
             # transform unit cube to prior volume
-            return (boundarray[:,0] + bounddiff*upars)
+            return (boundarray[:, 0] + bounddiff * upars)
 
         # estimate slope and intercept
-        self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=4e5,min_num_live_points=420, show_status=False)
-
+        noop = lambda *args, **kwargs: None
+        if self.verbose:
+            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=4e5,
+                                                                                         min_num_live_points=420,
+                                                                                         show_status=True)
+        else:
+            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=4e5,
+                                                                                         min_num_live_points=420,
+                                                                                         show_status=False,
+                                                                                         viz_callback=noop)
         # alloc data for best fit + error
         self.errors = {}
         self.quantiles = {}
@@ -118,7 +131,7 @@ class linear_fitter(object):
         self.model = self.epochs * self.parameters['m'] + self.parameters['b']
         self.residuals = self.data - self.model
 
-    def plot_oc(self, savefile=None, ylim='none', show_2sigma=False):
+    def plot_oc(self, savefile=None, ylim='none', show_2sigma=False, prior_name="Prior"):
         """ Plot the data in the form of residuals vs. time
 
         Parameters
@@ -132,105 +145,137 @@ class linear_fitter(object):
         """
 
         # set up the figure        
-        fig,ax = plt.subplots(1, figsize=(9,6))
+        fig, ax = plt.subplots(1, figsize=(9, 6))
 
-        # plot the data/residuals
-        ax.errorbar(self.epochs, self.residuals*24*60, yerr=self.dataerr*24*60, ls='none', marker='o',color='black')
-        ylower = (self.residuals.mean()-3*np.std(self.residuals))*24*60
-        yupper = (self.residuals.mean()+3*np.std(self.residuals))*24*60
+        # check if labels are not None
+        if self.labels is not None:
+            # find unique set of labels
+            ulabels = np.unique(self.labels)
+            # set up a color/marker cycle
+            markers = cycle(['o', 'v', '^', '<', '>', 's', '*', 'h', 'H', 'D', 'd', 'P', 'X'])
+            colors = cycle(['black', 'blue', 'green', 'orange', 'purple', 'grey', 'magenta', 'cyan', 'lime'])
+
+            # plot each label separately
+            for i, ulabel in enumerate(ulabels):
+                # find where the label matches
+                mask = self.labels == ulabel
+                # plot the data/residuals
+                ax.errorbar(self.epochs[mask], self.residuals[mask] * 24 * 60, yerr=self.dataerr[mask] * 24 * 60,
+                            ls='none', marker=next(markers), color=next(colors), label=ulabel)
+        else:
+            # plot the data/residuals
+            ax.errorbar(self.epochs, self.residuals * 24 * 60, yerr=self.dataerr * 24 * 60,
+                        ls='none', marker='o', color='black')
+
+        ylower = (self.residuals.mean() - 3 * np.std(self.residuals)) * 24 * 60
+        yupper = (self.residuals.mean() + 3 * np.std(self.residuals)) * 24 * 60
 
         # upsample data
-        epochs = (np.linspace(self.data.min()-7, self.data.max()+7, 1000) - self.parameters['b'])/self.parameters['m']
+        epochs = (np.linspace(self.data.min() - 7, self.data.max() + 7, 1000) -
+                  self.parameters['b']) / self.parameters['m']
 
         # set the y-axis limits
         depoch = self.epochs.max() - self.epochs.min()
-        ax.set_xlim([self.epochs.min()-depoch*0.01, self.epochs.max()+depoch*0.01])
+        ax.set_xlim([self.epochs.min() - depoch * 0.01, self.epochs.max() + depoch * 0.01])
 
         # best fit solution
-        model = epochs*self.parameters['m'] + self.parameters['b']
-    
+        model = epochs * self.parameters['m'] + self.parameters['b']
+
         # MonteCarlo the new ephemeris for uncertainty
         mc_m = np.random.normal(self.parameters['m'], self.errors['m'], size=10000)
         mc_b = np.random.normal(self.parameters['b'], self.errors['b'], size=10000)
-        mc_model = np.expand_dims(epochs,-1) * mc_m + mc_b
+        mc_model = np.expand_dims(epochs, -1) * mc_m + mc_b
 
         # create a fill between area for uncertainty of new ephemeris
         diff = mc_model.T - model
 
         if show_2sigma:
-            ax.fill_between(epochs, np.percentile(diff,2,axis=0)*24*60, np.percentile(diff,98,axis=0)*24*60, alpha=0.2, color='k', label=r'Uncertainty ($\pm$ 2$\sigma$)')
+            ax.fill_between(epochs, np.percentile(diff, 2, axis=0) * 24 * 60, np.percentile(diff, 98, axis=0) * 24 * 60,
+                            alpha=0.2, color='k', label=r'Uncertainty ($\pm$ 2$\sigma$)')
         else:
             # show 1 sigma
-            ax.fill_between(epochs, np.percentile(diff,36,axis=0)*24*60, np.percentile(diff,64,axis=0)*24*60, alpha=0.2, color='k', label=r'Uncertainty ($\pm$ 1$\sigma$)')
+            ax.fill_between(epochs, np.percentile(diff, 36, axis=0) * 24 * 60,
+                            np.percentile(diff, 64, axis=0) * 24 * 60, alpha=0.2, color='k',
+                            label=r'Uncertainty ($\pm$ 1$\sigma$)')
 
         # duplicate axis and plot days since mid-transit
         ax2 = ax.twiny()
-        ax2.set_xlabel(f"Time [BJD - {self.parameters['b']:.1f}]",fontsize=14)
+        ax2.set_xlabel(f"Time [BJD - {self.parameters['b']:.1f}]", fontsize=14)
         ax2.set_xlim(ax.get_xlim())
         xticks = ax.get_xticks()
-        dt = np.round(xticks*self.parameters['m'],1)
-        #ax2.set_xticks(dt)
+        dt = np.round(xticks * self.parameters['m'], 1)
+        # ax2.set_xticks(dt)
         ax2.set_xticklabels(dt)
 
         if ylim == 'diff':
-            ax.set_ylim([ min(np.percentile(diff,1,axis=0)*24*60),
-                          max(np.percentile(diff,99,axis=0)*24*60)])
+            ax.set_ylim([min(np.percentile(diff, 1, axis=0) * 24 * 60),
+                         max(np.percentile(diff, 99, axis=0) * 24 * 60)])
 
         # overlay the prior ephemeris
         if self.prior is not None:
             # create fill between area for uncertainty of old/prior ephemeris
-            epochs_p = (np.linspace(self.data.min()-7, self.data.max()+7, 1000) - self.prior['b'][0])/self.prior['m'][0]
-            prior = epochs_p*self.prior['m'][0] + self.prior['b'][0]
+            epochs_p = (np.linspace(self.data.min() - 7, self.data.max() + 7, 1000) -
+                        self.prior['b'][0]) / self.prior['m'][0]
+            prior = epochs_p * self.prior['m'][0] + self.prior['b'][0]
             mc_m_p = np.random.normal(self.prior['m'][0], self.prior['m'][1], size=10000)
             mc_b_p = np.random.normal(self.prior['b'][0], self.prior['b'][1], size=10000)
-            mc_model_p = np.expand_dims(epochs_p,-1) * mc_m_p + mc_b_p
+            mc_model_p = np.expand_dims(epochs_p, -1) * mc_m_p + mc_b_p
             diff_p = mc_model_p.T - model
 
             # plot an invisible line so the 2nd axes are happy
-            ax2.plot(epochs, (model-prior)*24*60, ls='--', color='r', alpha=0)
+            ax2.plot(epochs, (model - prior) * 24 * 60, ls='--', color='r', alpha=0)
 
             # why is this so small!?!?!? consistent to within machine precision?
-            #ax.plot(epochs, (model-prior)*24*60, ls='--', color='r')
+            # ax.plot(epochs, (model-prior)*24*60, ls='--', color='r')
 
             if show_2sigma:
-                ax.fill_between(epochs, np.percentile(diff_p,2,axis=0)*24*60, np.percentile(diff_p,98,axis=0)*24*60, alpha=0.1, color='r', label=r'Prior ($\pm$ 2$\sigma$)')
+                ax.fill_between(epochs, np.percentile(diff_p, 2, axis=0) * 24 * 60,
+                                np.percentile(diff_p, 98, axis=0) * 24 * 60, alpha=0.1, color='r',
+                                label=rf'{prior_name} ($\pm$ 2$\sigma$)')
             else:
                 # show ~1 sigma
-                ax.fill_between(epochs, np.percentile(diff_p,36,axis=0)*24*60, np.percentile(diff_p,64,axis=0)*24*60, alpha=0.1, color='r', label=r'Prior ($\pm$ 1$\sigma$)')
+                ax.fill_between(epochs, np.percentile(diff_p, 36, axis=0) * 24 * 60,
+                                np.percentile(diff_p, 64, axis=0) * 24 * 60, alpha=0.1, color='r',
+                                label=rf'{prior_name} ($\pm$ 1$\sigma$)')
 
             if ylim == 'prior':
-                ax.set_ylim([ min(np.percentile(diff_p,1,axis=0)*24*60),
-                            max(np.percentile(diff_p,99,axis=0)*24*60)])
+                ax.set_ylim([min(np.percentile(diff_p, 1, axis=0) * 24 * 60),
+                             max(np.percentile(diff_p, 99, axis=0) * 24 * 60)])
             elif ylim == 'average':
-                ax.set_ylim([ 0.5*(min(np.percentile(diff,1,axis=0)*24*60) + min(np.percentile(diff_p,1,axis=0)*24*60)),
-                            0.5*(max(np.percentile(diff,99,axis=0)*24*60) + max(np.percentile(diff_p,99,axis=0)*24*60))])
+                ax.set_ylim([0.5 * (min(np.percentile(diff, 1, axis=0) * 24 * 60) +
+                                    min(np.percentile(diff_p, 1, axis=0) * 24 * 60)),
+                             0.5 * (max(np.percentile(diff, 99, axis=0) * 24 * 60) +
+                                    max(np.percentile(diff_p, 99, axis=0) * 24 * 60))])
 
-        ax.axhline(0,color='black',alpha=0.5,ls='--',
-                   label="Period: {:.7f}+-{:.7f} days\nT_mid: {:.7f}+-{:.7f} BJD".format(self.parameters['m'], self.errors['m'], self.parameters['b'], self.errors['b']))
+        ax.axhline(0, color='black', alpha=0.5, ls='--',
+                   label="Period: {:.7f}+-{:.7f} days\nT_mid: {:.7f}+-{:.7f} BJD".format(self.parameters['m'],
+                                                                                         self.errors['m'],
+                                                                                         self.parameters['b'],
+                                                                                         self.errors['b']))
 
         # TODO sig figs
-        #lclabel2 = r"$T_{mid}$ = %s $\pm$ %s BJD$_{TDB}$" %(
+        # lclabel2 = r"$T_{mid}$ = %s $\pm$ %s BJD$_{TDB}$" %(
         #    str(round_to_2(self.parameters['tmid'], self.errors.get('tmid',0))),
         #    str(round_to_2(self.errors.get('tmid',0)))
-        #)
+        # )
 
         ax.legend(loc='best')
-        ax.set_xlabel("Epoch [number]",fontsize=14)
-        ax.set_ylabel("Residuals [min]",fontsize=14)
+        ax.set_xlabel("Epoch [number]", fontsize=14)
+        ax.set_ylabel("Residuals [min]", fontsize=14)
         ax.grid(True, ls='--')
         return fig, ax
 
     def plot_triangle(self):
         """ Create a posterior triangle plot of the results. """
         ranges = []
-        mask1 = np.ones(len(self.results['weighted_samples']['logl']),dtype=bool)
-        mask2 = np.ones(len(self.results['weighted_samples']['logl']),dtype=bool)
-        mask3 = np.ones(len(self.results['weighted_samples']['logl']),dtype=bool)
+        mask1 = np.ones(len(self.results['weighted_samples']['logl']), dtype=bool)
+        mask2 = np.ones(len(self.results['weighted_samples']['logl']), dtype=bool)
+        mask3 = np.ones(len(self.results['weighted_samples']['logl']), dtype=bool)
         titles = []
-        labels= []
+        labels = []
         flabels = {
-            'm':'Period [day]',
-            'b':'T_mid [JD]',
+            'm': 'Period [day]',
+            'b': 'T_mid [JD]',
         }
         for i, key in enumerate(self.quantiles):
             labels.append(flabels.get(key, key))
@@ -238,91 +283,92 @@ class linear_fitter(object):
 
             # set the axes limits for the plots
             ranges.append([
-                self.parameters[key] - 5*self.errors[key],
-                self.parameters[key] + 5*self.errors[key]
+                self.parameters[key] - 5 * self.errors[key],
+                self.parameters[key] + 5 * self.errors[key]
             ])
 
             if key == 'a2' or key == 'a1':
                 continue
 
             # create masks for contouring on sigma bounds
-            mask3 = mask3 & (self.results['weighted_samples']['points'][:,i] > (self.parameters[key] - 3*self.errors[key]) ) & \
-                (self.results['weighted_samples']['points'][:,i] < (self.parameters[key] + 3*self.errors[key]) )
+            mask3 = (mask3 &
+                     (self.results['weighted_samples']['points'][:, i] > (self.parameters[key] - 3 * self.errors[key])) &
+                     (self.results['weighted_samples']['points'][:, i] < (self.parameters[key] + 3 * self.errors[key])))
 
-            mask1 = mask1 & (self.results['weighted_samples']['points'][:,i] > (self.parameters[key] - self.errors[key]) ) & \
-                (self.results['weighted_samples']['points'][:,i] < (self.parameters[key] + self.errors[key]) )
+            mask1 = (mask1 &
+                     (self.results['weighted_samples']['points'][:, i] > (self.parameters[key] - self.errors[key])) &
+                     (self.results['weighted_samples']['points'][:, i] < (self.parameters[key] + self.errors[key])))
 
-            mask2 = mask2 & (self.results['weighted_samples']['points'][:,i] > (self.parameters[key] - 2*self.errors[key]) ) & \
-                (self.results['weighted_samples']['points'][:,i] < (self.parameters[key] + 2*self.errors[key]) )
+            mask2 = (mask2 &
+                     (self.results['weighted_samples']['points'][:, i] > ( self.parameters[key] - 2 * self.errors[key])) &
+                     (self.results['weighted_samples']['points'][:, i] < (self.parameters[key] + 2 * self.errors[key])))
 
-        chi2 = self.results['weighted_samples']['logl']*-2
+        chi2 = self.results['weighted_samples']['logl'] * -2
         fig = corner(self.results['weighted_samples']['points'],
-            labels= labels,
-            bins=int(np.sqrt(self.results['samples'].shape[0])),
-            range= ranges,
-            figsize=(10,10),
-            #quantiles=(0.1, 0.84),
-            plot_contours=True,
-            levels=[ np.percentile(chi2[mask1],95), np.percentile(chi2[mask2],95), np.percentile(chi2[mask3],95)],
-            plot_density=False,
-            titles=titles,
-            data_kwargs={
-                'c':chi2, # color code by chi2
-                'vmin':np.percentile(chi2[mask3],1),
-                'vmax':np.percentile(chi2[mask3],95),
-                'cmap':'viridis'
-            },
-            label_kwargs={
-                'labelpad':50,
-            },
-            hist_kwargs={
-                'color':'black',
-            }
-        )
+                     labels=labels,
+                     bins=int(np.sqrt(self.results['samples'].shape[0])),
+                     range=ranges,
+                     figsize=(10, 10),
+                     # quantiles=(0.1, 0.84),
+                     plot_contours=True,
+                     levels=[np.percentile(chi2[mask1], 95), np.percentile(chi2[mask2], 95),
+                             np.percentile(chi2[mask3], 95)],
+                     plot_density=False,
+                     titles=titles,
+                     data_kwargs={
+                         'c': chi2,  # color code by chi2
+                         'vmin': np.percentile(chi2[mask3], 1),
+                         'vmax': np.percentile(chi2[mask3], 95),
+                         'cmap': 'viridis',
+                     },
+                     label_kwargs={'labelpad': 50, },
+                     hist_kwargs={'color': 'black', }
+                     )
         return fig
 
-    def plot_periodogram(self):
+    def plot_periodogram(self, minper=0, maxper=0, maxper2=50):
         """ Search the residuals for periodic signals. """
 
         ########################################
         # create basis vectors for Tn = T0 + n*P
         basis = np.ones((2, len(self.epochs)))
         basis[1] = self.epochs
-        res_linear = sm.WLS(self.data, basis.T, weights=1.0/self.dataerr**2).fit()
-        coeffs_linear = res_linear.params #retrieve the slope and intercept
-        y_bestfit_linear = np.dot(basis.T, coeffs_linear) # reconstruct signal
+        res_linear = sm.WLS(self.data, basis.T, weights=1.0 / self.dataerr ** 2).fit()
+        coeffs_linear = res_linear.params  # retrieve the slope and intercept
+        y_bestfit_linear = np.dot(basis.T, coeffs_linear)  # reconstruct signal
         residuals = self.data - y_bestfit_linear
         ########################################
 
-
         # compute a period range based on nyquist frequency
         si = np.argsort(self.epochs)
-        minper = max(2,2 * np.diff(self.epochs[si]).min())
-        maxper = (np.max(self.epochs) - np.min(self.epochs))*3.
+
+        if minper == 0:
+            minper = max(3, 2 * np.diff(self.epochs[si]).min())
+        if maxper == 0:
+            maxper = (np.max(self.epochs) - np.min(self.epochs)) * 3.
 
         # recompute on new grid
         ls = LombScargle(self.epochs, residuals, dy=self.dataerr)
-        freq,power = ls.autopower(maximum_frequency=1./minper, minimum_frequency=1./maxper, nyquist_factor=2)
+        freq, power = ls.autopower(maximum_frequency=1. / minper, minimum_frequency=1. / maxper, nyquist_factor=2)
 
         # Phase fold data at max peak
         mi = np.argmax(power)
-        per = 1./freq[mi]
-        newphase = self.epochs/per % 1
-        self.periods = 1./freq
+        per = 1. / freq[mi]
+        newphase = self.epochs / per % 1
+        self.periods = 1. / freq
         self.power = power
-        
-        
+
         ########################################
         # create basis vectors for Tn = T0 + n*P + Asin(wn) + Bcos(wn)
         basis = np.ones((4, len(self.epochs)))
         basis[1] = self.epochs
-        basis[2] = np.sin(2*np.pi*self.epochs/per)
-        basis[3] = np.cos(2*np.pi*self.epochs/per)
+        basis[2] = np.sin(2 * np.pi * self.epochs / per)
+        basis[3] = np.cos(2 * np.pi * self.epochs / per)
 
         # perform the weighted least squares regression
-        res_first_order = sm.WLS(self.data, basis.T, weights=1.0/self.dataerr**2).fit()
-        coeffs_first_order = res_first_order.params 
-        y_bestfit_first_order = np.dot(basis.T, coeffs_first_order) # reconstruct signal
+        res_first_order = sm.WLS(self.data, basis.T, weights=1.0 / self.dataerr ** 2).fit()
+        coeffs_first_order = res_first_order.params
+        y_bestfit_first_order = np.dot(basis.T, coeffs_first_order)  # reconstruct signal
         residuals_first_order = self.data - y_bestfit_first_order
 
         # reconstruct signal with first two terms, i.e. linear solution (T0 + n*P)
@@ -330,192 +376,222 @@ class linear_fitter(object):
         residuals_linear = self.data - y_bestfit_linear_first_order
         ########################################
 
-
         ########################################
         # subtract first order solution from data and recompute periodogram
-        maxper = 50 # constrain second order solution to be less than 50 days
+        maxper = maxper2
 
         # recompute on new grid
         ls2 = LombScargle(self.epochs, residuals_linear, dy=self.dataerr)
-        freq2,power2 = ls.autopower(maximum_frequency=1./(1.01*per), minimum_frequency=1./maxper, nyquist_factor=2)
+        # freq2,power2 = ls.autopower(maximum_frequency=1./(1.01*per),
+        #                             minimum_frequency=1./maxper, nyquist_factor=2)
+        freq2, power2 = ls.autopower(maximum_frequency=1. / (1 + minper),
+                                     minimum_frequency=1. / maxper, nyquist_factor=2)
 
         # find max period
         mi2 = np.argmax(power2)
-        per2 = 1./freq2[mi2]
+        per2 = 1. / freq2[mi2]
 
         # create basis vectors for second order solution
         basis = np.ones((6, len(self.epochs)))
         basis[1] = self.epochs
-        basis[2] = np.sin(2*np.pi*self.epochs/per)
-        basis[3] = np.cos(2*np.pi*self.epochs/per)
-        basis[4] = np.sin(4*np.pi*self.epochs/per2)
-        basis[5] = np.cos(4*np.pi*self.epochs/per2)
+        basis[2] = np.sin(2 * np.pi * self.epochs / per)
+        basis[3] = np.cos(2 * np.pi * self.epochs / per)
+        basis[4] = np.sin(4 * np.pi * self.epochs / per2)
+        basis[5] = np.cos(4 * np.pi * self.epochs / per2)
 
         # perform the weighted least squares regression
-        res_second_order = sm.WLS(self.data, basis.T, weights=1.0/self.dataerr**2).fit()
+        res_second_order = sm.WLS(self.data, basis.T, weights=1.0 / self.dataerr ** 2).fit()
         coeffs_second_order = res_second_order.params
-        y_bestfit_second_order = np.dot(basis.T, coeffs_second_order) # reconstruct signal
+        y_bestfit_second_order = np.dot(basis.T, coeffs_second_order)  # reconstruct signal
         ########################################
 
+        # find the best bic
+        bics = [res_linear.bic, res_first_order.bic, res_second_order.bic]
+        best_bic = np.argmin(bics)
 
         ########################################
         # create plot
-        fig, ax = plt.subplots(4, figsize=(10,14))
+        fig, ax = plt.subplots(4, figsize=(10, 14))
 
         # periodogram plot for residuals
-        ax[0].semilogx(self.periods,self.power,'k-',label='Data', zorder=5)
-        ax[0].set_xlabel("Period [epoch]",fontsize=14)
-        ax[0].set_ylabel('Power',fontsize=14)
-        ax[0].axvline(per,color='red',label=f'Period: {per:.2f}',alpha=0.75, zorder=10)
-        ax[0].axvline(per2,color='cyan', alpha=0.5, label=f'Period: {per2:.2f}', zorder=10)
-        ax[0].set_title("Lomb-Scargle Periodogram")
-        ax[0].set_ylim([0,0.5*(self.power.max()+np.percentile(self.power,99))])
-        ax[0].set_xlim([minper,maxper])
+        ax[0].semilogx(self.periods, self.power, 'k-', label='Data', zorder=5)
+        ax[0].set_xlabel("Period [epoch]", fontsize=14)
+        ax[0].set_ylabel('Power', fontsize=14)
+        ax[0].axvline(per, color='red', label=f'Period: {per:.2f} epochs', alpha=0.75, zorder=10)
+        # find power at closest period
+        idx = np.argmin(np.abs(self.periods - per))
+        per_power1 = self.power[idx]
+
+        # find power at closest period
+        idx = np.argmin(np.abs(self.periods - per2))
+        per_power2 = self.power[idx]
+
+        ax[0].set_title("Lomb-Scargle Periodogram", fontsize=18)
+        ax[0].set_xlim([minper, (np.max(self.epochs) - np.min(self.epochs)) * 3.])
 
         # plot false alarm probability on lomb-scargle periodogram
-        fp = ls.false_alarm_probability(power.max(), method='bootstrap')
-        fp_levels = ls.false_alarm_level([0.01, 0.05, 0.1], method='bootstrap')
+        fp = ls.false_alarm_probability(power.max(), method='davies')
+        fp_levels = ls.false_alarm_level([0.01, 0.05, 0.1], method='davies')
+
+        # set upper y-limit on plot
+        ax[0].set_ylim([0, self.power.max()])
 
         # plot as horizontal line
-        ax[0].axhline(fp_levels[0], color='red', ls='--', label='99% FAP')
+        ax[0].axhline(fp_levels[0], color='red', ls='--', label=f'99% FAP (Power = {fp_levels[0]:.1f})')
 
         # plot lomb-scargle for detrended data
-        ax[0].semilogx(1./freq2,power2*0.99,'g-',alpha=0.5,label='Detrended Data', zorder=7)
+        ax[0].semilogx(1. / freq2, power2 * 0.99, 'g-', alpha=0.5, label='Data - Fourier Fit 1', zorder=7)
 
         # plot false alarm probability on lomb-scargle periodogram
-        fp = ls2.false_alarm_probability(power2.max(), method='bootstrap')
-        fp_levels = ls2.false_alarm_level([0.01, 0.05, 0.1], method='bootstrap')
+        fp = ls2.false_alarm_probability(power2.max(), method='davies')
+        fp_levels2 = ls2.false_alarm_level([0.01, 0.05, 0.1], method='davies')
+
+        # best period + false alarm for second order solution
+        ax[0].axvline(per2, color='cyan', alpha=0.5, label=f'Period: {per2:.2f} epochs', zorder=10)
+        ax[0].axhline(fp_levels2[0], color='cyan', ls='--', label=f'99% FAP (Power = {fp_levels2[0]:.1f})')
 
         # add horizontal dotted line at zero
-        ax[1].axhline(0, color='black', ls='--', label=f"Linear Fit (BIC: {res_linear.bic:.2f})")
+        linear_label = f"Linear Fit (BIC: {res_linear.bic:.2f})"
+        if best_bic == 0:
+            linear_label += " best"
+        ax[1].axhline(0, color='black', ls='--', label=linear_label)
 
         # super sample fourier solution for first order
         xnew = np.linspace(self.epochs.min(), self.epochs.max(), 1000)
         basis_new = np.ones((2, len(xnew)))
-        basis_new[0] = np.sin(2*np.pi*xnew/per)
-        basis_new[1] = np.cos(2*np.pi*xnew/per)
-        y_bestfit_new = np.dot(basis_new.T, coeffs_first_order[2:]) # reconstruct signal
+        basis_new[0] = np.sin(2 * np.pi * xnew / per)
+        basis_new[1] = np.cos(2 * np.pi * xnew / per)
+        y_bestfit_new = np.dot(basis_new.T, coeffs_first_order[2:])  # reconstruct signal
 
         # plot first order fourier solution
-        ax[1].plot(xnew, y_bestfit_new*24*60, 'r-', label=f'Fourier Fit 1st (BIC: {res_first_order.bic:.2f})', alpha=0.75)
+        fourier1_label = f'Fourier Fit 1st (BIC: {res_first_order.bic:.2f})'
+        if per_power1 < fp_levels[0]:
+            fourier1_label += " below 99% FAP"
+        ax[1].plot(xnew, y_bestfit_new * 24 * 60, 'r-', label=fourier1_label, alpha=0.75)
 
         # set up ax labels
-        ax[1].set_xlabel(f"Epochs",fontsize=14)
-        ax[1].set_ylabel("O-C [min]",fontsize=14)
-        ax[1].grid(True,ls='--')
+        ax[1].set_xlabel(f"Epochs", fontsize=14)
+        ax[1].set_ylabel("O-C [min]", fontsize=14)
+        ax[1].grid(True, ls='--')
         depoch = self.epochs.max() - self.epochs.min()
-        ax[1].set_xlim([self.epochs.min()-depoch*0.01, self.epochs.max()+depoch*0.01])
+        ax[1].set_xlim([self.epochs.min() - depoch * 0.01, self.epochs.max() + depoch * 0.01])
 
         # o-c time series with fourier solution
-        ax[1].errorbar(self.epochs, residuals_linear*24*60,
-                    yerr=self.dataerr*24*60,ls='none',
-                    marker='.',color='black',
-                    label=f'Data')
+        ax[1].errorbar(self.epochs, residuals_linear * 24 * 60,
+                       yerr=self.dataerr * 24 * 60, ls='none',
+                       marker='.', color='black', label=f'Data')
 
         # super sample fourier solution for second order
         xnew = np.linspace(self.epochs.min(), self.epochs.max(), 1000)
         basis_new = np.ones((4, len(xnew)))
-        basis_new[0] = np.sin(2*np.pi*xnew/per)
-        basis_new[1] = np.cos(2*np.pi*xnew/per)
-        basis_new[2] = np.sin(4*np.pi*xnew/per2)
-        basis_new[3] = np.cos(4*np.pi*xnew/per2)
-        y_bestfit_new2 = np.dot(basis_new.T, coeffs_second_order[2:]) # reconstruct signal
+        basis_new[0] = np.sin(2 * np.pi * xnew / per)
+        basis_new[1] = np.cos(2 * np.pi * xnew / per)
+        basis_new[2] = np.sin(4 * np.pi * xnew / per2)
+        basis_new[3] = np.cos(4 * np.pi * xnew / per2)
+        y_bestfit_new2 = np.dot(basis_new.T, coeffs_second_order[2:])  # reconstruct signal
 
         # plot first order fourier solution
-        ax[1].plot(xnew, y_bestfit_new2*24*60, 'c-', label=f'Fourier Fit 2nd (BIC: {res_second_order.bic:.2f})', alpha=0.75)
+        fourier2_label = f'Fourier Fit 2nd (BIC: {res_second_order.bic:.2f})'
+        if per_power2 < fp_levels2[0]:  # should be fp_levels2?
+            fourier2_label += " below 99% FAP"
+        ax[1].plot(xnew, y_bestfit_new2 * 24 * 60, 'c-', label=fourier2_label, alpha=0.75)
 
         # set up ax labels
-        ax[1].set_xlabel(f"Epochs",fontsize=14)
-        ax[1].set_ylabel("O-C [min]",fontsize=14)
-        ax[1].grid(True,ls='--')
+        ax[1].set_xlabel(f"Epochs", fontsize=14)
+        ax[1].set_ylabel("O-C [min]", fontsize=14)
+        ax[1].grid(True, ls='--')
         ax[1].legend(loc='best')
         ax[0].legend(loc='best')
 
         # plot phase folded signal for first order solution
         xnew = np.linspace(0, per, 1000)
         basis_new = np.ones((2, len(xnew)))
-        basis_new[0] = np.sin(2*np.pi*xnew/per)
-        basis_new[1] = np.cos(2*np.pi*xnew/per)
-        y_bestfit_new = np.dot(basis_new.T, coeffs_first_order[2:]) # reconstruct signal
-        xnewphase = xnew/per % 1
+        basis_new[0] = np.sin(2 * np.pi * xnew / per)
+        basis_new[1] = np.cos(2 * np.pi * xnew / per)
+        y_bestfit_new = np.dot(basis_new.T, coeffs_first_order[2:])  # reconstruct signal
+        xnewphase = xnew / per % 1
         si = np.argsort(xnewphase)
 
         # use uncertainty to derive fill between region
-        std_dev = np.sqrt(np.diagonal(res_first_order.normalized_cov_params)) 
+        std_dev = np.sqrt(np.diagonal(res_first_order.normalized_cov_params))
         samples_1st = []
         samples_2nd = []
 
         for i in range(1000):
-            coeffs_1st = res_first_order.params + np.random.normal(0,1,res_first_order.params.shape[0])*std_dev
-            samples_1st.append(np.dot(basis_new.T, coeffs_1st[2:])) # TODO add in offset + period error
+            coeffs_1st = res_first_order.params + np.random.normal(0, 1, res_first_order.params.shape[0]) * std_dev
+            samples_1st.append(np.dot(basis_new.T, coeffs_1st[2:]))  # TODO add in offset + period error
         samples_1st = np.array(samples_1st)
 
         # fill between region +/- 1 sigma
-        ax[2].fill_between(xnewphase[si], np.percentile(samples_1st,16,axis=0)[si]*24*60, np.percentile(samples_1st,84,axis=0)[si]*24*60, color='red', alpha=0.3, label='1-sigma region')
+        ax[2].fill_between(xnewphase[si],
+                           np.percentile(samples_1st, 16, axis=0)[si] * 24 * 60,
+                           np.percentile(samples_1st, 84, axis=0)[si] * 24 * 60,
+                           color='red', alpha=0.3, label='1-sigma region')
 
         # fill for 3 sigma
-        ax[2].fill_between(xnewphase[si], np.percentile(samples_1st,0.15,axis=0)[si]*24*60, np.percentile(samples_1st,99.85,axis=0)[si]*24*60, color='red', alpha=0.1, label='3-sigma region')
+        ax[2].fill_between(xnewphase[si],
+                           np.percentile(samples_1st, 0.15, axis=0)[si] * 24 * 60,
+                           np.percentile(samples_1st, 99.85, axis=0)[si] * 24 * 60,
+                           color='red', alpha=0.1, label='3-sigma region')
 
         # sort data in phase
         si = np.argsort(newphase)
 
         # plot data
-        ax[2].errorbar(self.epochs/per%1, residuals_linear*24*60,
-                    yerr=self.dataerr*24*60,ls='none',
-                    marker='.',color='black',
-                    label=f'Data')
+        ax[2].errorbar(self.epochs / per % 1, residuals_linear * 24 * 60,
+                       yerr=self.dataerr * 24 * 60, ls='none',
+                       marker='.', color='black', label=f'Data')
 
-        ax[2].set_xlabel(f"Phase (Period: {per:.2f} epochs)",fontsize=14)
-        ax[2].set_ylabel("O-C [min]",fontsize=14)
-        ax[2].grid(True,ls='--')
+        ax[2].set_xlabel(f"Phase (Period: {per:.2f} epochs)", fontsize=14)
+        ax[2].set_ylabel("O-C [min]", fontsize=14)
+        ax[2].grid(True, ls='--')
         ax[2].legend(loc='best')
 
         # find best fit signal with 2 periods
         # construct basis vectors with sin and cos
         basis2 = np.ones((5, len(self.epochs)))
-        basis2[0] = np.sin(2*np.pi*self.epochs/per)
-        basis2[1] = np.cos(2*np.pi*self.epochs/per)
-        basis2[2] = np.sin(2*np.pi*self.epochs/per2)
-        basis2[3] = np.cos(2*np.pi*self.epochs/per2)
+        basis2[0] = np.sin(2 * np.pi * self.epochs / per)
+        basis2[1] = np.cos(2 * np.pi * self.epochs / per)
+        basis2[2] = np.sin(2 * np.pi * self.epochs / per2)
+        basis2[3] = np.cos(2 * np.pi * self.epochs / per2)
 
-        #perform the weighted least squares regression to find second order fourier solution
-        res = sm.WLS(residuals_first_order, basis2.T, weights=1.0/self.dataerr**2).fit()
-        coeffs = res.params #retrieve the slope and intercept of the fit from res
+        # perform the weighted least squares regression to find second order fourier solution
+        res = sm.WLS(residuals_first_order, basis2.T, weights=1.0 / self.dataerr ** 2).fit()
+        coeffs = res.params  # retrieve the slope and intercept of the fit from res
         y_bestfit = np.dot(basis2.T, coeffs)
 
         # super sample fourier solution
         xnew = np.linspace(self.epochs.min(), self.epochs.max(), 1000)
         basis_new = np.ones((5, len(xnew)))
-        basis_new[1] = np.sin(2*np.pi*xnew/per)
-        basis_new[2] = np.cos(2*np.pi*xnew/per)
-        basis_new[3] = np.sin(2*np.pi*xnew/per2)
-        basis_new[4] = np.cos(2*np.pi*xnew/per2)
+        basis_new[1] = np.sin(2 * np.pi * xnew / per)
+        basis_new[2] = np.cos(2 * np.pi * xnew / per)
+        basis_new[3] = np.sin(2 * np.pi * xnew / per2)
+        basis_new[4] = np.cos(2 * np.pi * xnew / per2)
         y_bestfit_new = np.dot(basis_new.T, coeffs)
-        xnewphase = xnew/per2 % 1
+        xnewphase = xnew / per2 % 1
         si = np.argsort(xnewphase)
 
-        newphase = self.epochs/per2 % 1
-        ax[3].errorbar(newphase,residuals_first_order*24*60,
-                    yerr=self.dataerr*24*60,ls='none',
-                    marker='.',color='black',
-                    label=f'Data - Fourier Fit 1')
+        newphase = self.epochs / per2 % 1
+        ax[3].errorbar(newphase, residuals_first_order * 24 * 60,
+                       yerr=self.dataerr * 24 * 60, ls='none',
+                       marker='.', color='black', label=f'Data - Fourier Fit 1')
 
         # create single sine wave from detrended data
         basis_new = np.ones((3, len(xnew)))
-        basis_new[1] = np.sin(2*np.pi*xnew/per)
-        basis_new[2] = np.cos(2*np.pi*xnew/per)
+        basis_new[1] = np.sin(2 * np.pi * xnew / per)
+        basis_new[2] = np.cos(2 * np.pi * xnew / per)
         y_best_single = np.dot(basis_new.T, coeffs[:3])
 
         # create best double sine wave from detrended data
         basis_new = np.ones((5, len(xnew)))
-        basis_new[1] = np.sin(2*np.pi*xnew/per)
-        basis_new[2] = np.cos(2*np.pi*xnew/per)
-        basis_new[3] = np.sin(2*np.pi*xnew/per2)
-        basis_new[4] = np.cos(2*np.pi*xnew/per2)
+        basis_new[1] = np.sin(2 * np.pi * xnew / per)
+        basis_new[2] = np.cos(2 * np.pi * xnew / per)
+        basis_new[3] = np.sin(2 * np.pi * xnew / per2)
+        basis_new[4] = np.cos(2 * np.pi * xnew / per2)
         y_best_double = np.dot(basis_new.T, coeffs)
 
         # use uncertainty to derive fill between region
-        std_dev = np.sqrt(np.diagonal(res.normalized_cov_params)) 
+        std_dev = np.sqrt(np.diagonal(res.normalized_cov_params))
         samples = []
         for i in range(1000):
             coeffs = res.params + np.random.normal(0, std_dev)
@@ -526,103 +602,305 @@ class linear_fitter(object):
 
         y_bestfit_new = y_best_double - y_best_single
 
-        ax[3].set_xlabel(f"Phase (Period: {per2:.2f} epochs)",fontsize=14)
-        ax[3].set_ylabel("Residuals [min]",fontsize=14)
-        ax[3].grid(True,ls='--')
+        ax[3].set_xlabel(f"Phase (Period: {per2:.2f} epochs)", fontsize=14)
+        ax[3].set_ylabel("Residuals [min]", fontsize=14)
+        ax[3].grid(True, ls='--')
 
         # fill between region +/- 1 sigma
-        ax[3].fill_between(xnewphase[si], np.percentile(samples,16,axis=0)[si]*24*60, np.percentile(samples,84,axis=0)[si]*24*60, color='cyan', alpha=0.4, label='1-sigma region')
+        ax[3].fill_between(xnewphase[si],
+                           np.percentile(samples, 16, axis=0)[si] * 24 * 60,
+                           np.percentile(samples, 84, axis=0)[si] * 24 * 60,
+                           color='cyan', alpha=0.4, label='1-sigma region')
 
         # fill for 3 sigma
-        ax[3].fill_between(xnewphase[si], np.percentile(samples,0.15,axis=0)[si]*24*60, np.percentile(samples,99.85,axis=0)[si]*24*60, color='cyan', alpha=0.2, label='3-sigma region')
+        ax[3].fill_between(xnewphase[si],
+                           np.percentile(samples, 0.15, axis=0)[si] * 24 * 60,
+                           np.percentile(samples, 99.85, axis=0)[si] * 24 * 60,
+                           color='cyan', alpha=0.2, label='3-sigma region')
 
         ax[3].legend(loc='best')
 
-        return fig,ax
+        return fig, ax
 
-def main():
-    Tc = np.array([ # measured mid-transit times
-    2456588.69897499, 2456593.73645465, 2456646.65419785,
-       2456923.85589088, 2456971.73409754, 2458042.70521614,
-       2458047.75761158, 2458095.62091434, 2458100.66454441,
-       2453912.51471333, 2454461.86099   , 2455215.32701,
-       2455530.3197    , 2456543.33866   , 2459854.549103  
-    ])
+class non_linear_fitter(object):
 
-    Tc_error = np.array([
-    0.00237294, 0.00290445, 0.00647494, 0.00445833, 0.00477952,
-       0.00310127, 0.00209248, 0.00099052, 0.00563974, 0.00054,
-       0.00024   , 0.00015   , 0.00016   , 0.00028   , 0.000382 
-    ])
+    def __init__(self, data, dataerr, bounds=None, prior=None, labels=None, verbose=True):
+        """
+        Fit a Non-linear model to data using nested sampling.
+        https://arxiv.org/pdf/2211.05646.pdf eq. 3
 
-    P = 2.5199412024  # orbital period for your target
+        Parameters
+        ----------
+        data : array
+            Data to fit.
+        dataerr : array
+            Error on data.
+        bounds : dict, optional
+            Bounds on parameters. Dictionary of tuples/list
+        prior : dict, optional
+            Prior on parameters for slope and intercept. Dictionary of tuples/list
+        """
+        self.data = data
+        self.dataerr = dataerr
+        self.bounds = bounds
+        self.labels = np.array(labels)
+        self.prior = prior.copy()  # dict {'m':(0.1,0.5), 'b':(0,1)}
+        self.verbose = verbose
+        if bounds is None:
+            # use +- 3 sigma prior as bounds
+            # prior is list of tuples (mean, std)
+            self.bounds = {
+                'P': [prior['P'][0] - 3 * prior['P'][1], prior['P'][0] + 3 * prior['P'][1]],
+                't0': [prior['t0'][0] - 3 * prior['t0'][1], prior['t0'][0] + 3 * prior['t0'][1]],
+                'dPdN': [prior['dPdN'][0] - 3 * prior['dPdN'][1], prior['dPdN'][0] + 3 * prior['dPdN'][1]]
+            }
+        self.results = None
+        self.fit_nested()
 
-    Tc_norm = Tc - Tc.min()  #normalize the data to the first observation
-    #print(Tc_norm)
-    orbit = np.rint(Tc_norm / P)  #number of orbits since first observation (rounded to nearest integer)
-    #print(orbit)
+    def fit_nested(self):
+        """ Fit a linear model to data using nested sampling. """
 
-    #make a n x 2 matrix with 1's in the first column and values of orbit in the second
-    A = np.vstack([np.ones(len(Tc)), orbit]).T 
+        freekeys = list(self.bounds.keys())
+        boundarray = np.array([self.bounds[k] for k in freekeys])
+        bounddiff = np.diff(boundarray, 1).reshape(-1)
 
-    #perform the weighted least squares regression
-    res = sm.WLS(Tc, A, weights=1.0/Tc_error**2).fit() 
-    #use sm.WLS for weighted LS, sm.OLS for ordinary LS, or sm.GLS for general LS
+        # orbital epochs (N)
+        self.epochs = np.round((self.data - np.mean(self.bounds['t0'])) / np.mean(self.bounds['P']))
 
-    params = res.params #retrieve the slope and intercept of the fit from res
-    std_dev = np.sqrt(np.diagonal(res.normalized_cov_params)) 
+        def loglike(pars):
+            # chi-squared
+            # tmid = t0 + N*P + 0.5*dPdN*N**2 (eq 3 from paper)
+            model = pars[0] * self.epochs + pars[1] + 0.5 * pars[2] * self.epochs ** 2
+            return -0.5 * np.sum(((self.data - model) / self.dataerr) ** 2)
 
-    slope = params[1]
-    slope_std_dev = std_dev[1]
-    intercept = params[0]
-    intercept_std_dev = std_dev[0]
+        def prior_transform(upars):
+            # transform unit cube to prior volume
+            return (boundarray[:, 0] + bounddiff * upars)
 
-    #print(res.summary())
-    #print("Params =",params)
-    #print("Error matrix =",res.normalized_cov_params)
-    #print("Standard Deviations =",std_dev)
+        # estimate slope and intercept
+        noop = lambda *args, **kwargs: None
+        if self.verbose:
+            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=4e5,
+                                                                                         min_num_live_points=420,
+                                                                                         show_status=True)
+        else:
+            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=4e5,
+                                                                                         min_num_live_points=420,
+                                                                                         show_status=False,
+                                                                                         viz_callback=noop)
+        # alloc data for best fit + error
+        self.errors = {}
+        self.quantiles = {}
+        self.parameters = {}
 
-    print("Weighted Linear Least Squares Solution")
-    print("T0 =",intercept,"+-",intercept_std_dev)
-    print("P =",slope,"+-",slope_std_dev)
+        for i, key in enumerate(freekeys):
+            self.parameters[key] = self.results['maximum_likelihood']['point'][i]
+            self.errors[key] = self.results['posterior']['stdev'][i]
+            self.quantiles[key] = [
+                self.results['posterior']['errlo'][i],
+                self.results['posterior']['errup'][i]]
 
-    # min and max values to search between for fitting
-    bounds = {
-        'm':[P-0.1, P+0.1],                 # orbital period
-        'b':[intercept-0.1, intercept+0.1]  # mid-transit time
-    }
+        # final model
+        self.model = self.parameters['t0'] + self.epochs * self.parameters['P'] #+ 0.5 * self.parameters['dPdN'] * self.epochs ** 2
+        self.residuals = self.data - self.model
 
-    # used to plot red overlay in O-C figure
-    prior = {
-        'm':[slope, slope_std_dev],         # value from WLS (replace with literature value)
-        'b':[intercept, intercept_std_dev]  # value from WLS (replace with literature value)
-    }
+    def plot_oc(self, savefile=None, ylim='none', show_2sigma=False, prior_name="Prior"):
+        """ Plot the data in the form of residuals vs. time
 
-    prior = {
-        'm':[2.5199412024020322, 2.59214970054424e-06],
-        'b':[2459854.54339036, 0.0024412]
-    }
+        Parameters
+        ----------
+        savefile : str, optional
+            Save the figure to a file.
+        ylim : str, optional
+            Set the y-axis limits. Default is 'none'. Can be prior, average, or none.
+        show_2sigma : bool, optional
+            Show a fill between using the 2 sigma limits. Default is False (aka 1 sigma)
+        """
 
-    lf = linear_fitter( Tc, Tc_error, bounds, prior=prior )
+        # set up the figure        
+        fig, ax = plt.subplots(1, figsize=(9, 6))
 
-    lf.plot_triangle()
-    plt.subplots_adjust(top=0.9,hspace=0.2,wspace=0.2)
-    plt.savefig("posterior.png")
-    plt.close()
-    print("image saved to: posterior.png")
+        # check if labels are not None
+        if self.labels is not None:
+            # find unique set of labels
+            ulabels = np.unique(self.labels)
+            # set up a color/marker cycle
+            markers = cycle(['o', 'v', '^', '<', '>', 's', '*', 'h', 'H', 'D', 'd', 'P', 'X'])
+            colors = cycle(['black', 'blue', 'green', 'orange', 'purple', 'grey', 'magenta', 'cyan', 'lime'])
 
-    fig,ax = lf.plot_oc()
-    plt.tight_layout()
-    plt.savefig("oc.png")
-    plt.show()
-    plt.close()
-    print("image saved to: oc.png")
+            # plot each label separately
+            for i, ulabel in enumerate(ulabels):
+                # find where the label matches
+                mask = self.labels == ulabel
+                # plot the data/residuals
+                ax.errorbar(self.epochs[mask], self.residuals[mask] * 24 * 60, yerr=self.dataerr[mask] * 24 * 60,
+                            ls='none', marker=next(markers), color=next(colors), label=ulabel)
+        else:
+            # plot the data/residuals
+            ax.errorbar(self.epochs, self.residuals * 24 * 60, yerr=self.dataerr * 24 * 60,
+                        ls='none', marker='o', color='black')
 
-    fig,ax = lf.plot_periodogram()
-    plt.tight_layout()
-    plt.savefig("periodogram.png")
-    plt.close()
-    print("image saved to: periodogram.png")
+        ylower = (self.residuals.mean() - 3 * np.std(self.residuals)) * 24 * 60
+        yupper = (self.residuals.mean() + 3 * np.std(self.residuals)) * 24 * 60
 
-if __name__ == "__main__":
-    main()
+        # upsample data
+        epochs = (np.linspace(self.data.min() - 7, self.data.max() + 365*5, 1000) -
+                  self.parameters['t0']) / self.parameters['P']
+
+        # set the y-axis limits
+        depoch = self.epochs.max() - self.epochs.min()
+        #ax.set_xlim([self.epochs.min() - depoch * 0.01, self.epochs.max() + depoch * 0.01])
+
+        # best fit solution
+        model = epochs * self.parameters['P'] + self.parameters['t0']
+        # nl_model = epochs * self.parameters['P'] + self.parameters['t0'] + 0.5 * self.parameters['dPdN'] * epochs ** 2
+
+        # MonteCarlo the new ephemeris for uncertainty
+        mc_m = np.random.normal(self.parameters['P'], self.errors['P'], size=10000)
+        mc_b = np.random.normal(self.parameters['t0'], self.errors['t0'], size=10000)
+        mc_dPdN = np.random.normal(self.parameters['dPdN'], self.errors['dPdN'], size=10000)
+        mc_model = np.expand_dims(epochs, -1) * mc_m + mc_b + 0.5 * mc_dPdN * np.expand_dims(epochs, -1) ** 2
+
+        # create a fill between area for uncertainty of new ephemeris
+        diff = mc_model.T - model
+
+        if show_2sigma:
+            ax.fill_between(epochs, np.percentile(diff, 2, axis=0) * 24 * 60, np.percentile(diff, 98, axis=0) * 24 * 60,
+                            alpha=0.2, color='k', label=r'Uncertainty ($\pm$ 2$\sigma$)')
+        else:
+            # show 1 sigma
+            ax.fill_between(epochs, np.percentile(diff, 36, axis=0) * 24 * 60,
+                            np.percentile(diff, 64, axis=0) * 24 * 60, alpha=0.2, color='k',
+                            label=r'Uncertainty ($\pm$ 1$\sigma$)')
+
+        # duplicate axis and plot days since mid-transit
+        ax2 = ax.twiny()
+        ax2.set_xlabel(f"Time [BJD - {self.parameters['t0']:.1f}]", fontsize=14)
+        ax2.set_xlim(ax.get_xlim())
+        xticks = ax.get_xticks()
+        dt = np.round(xticks * self.parameters['P'], 1)
+        # ax2.set_xticks(dt)
+        ax2.set_xticklabels(dt)
+
+        if ylim == 'diff':
+            ax.set_ylim([min(np.percentile(diff, 1, axis=0) * 24 * 60),
+                         max(np.percentile(diff, 99, axis=0) * 24 * 60)])
+
+        # overlay the prior ephemeris
+        if self.prior is not None:
+            # create fill between area for uncertainty of old/prior ephemeris
+            epochs_p = (np.linspace(self.data.min() - 7, self.data.max() + 365*5, 1000) -
+                        self.prior['t0'][0]) / self.prior['P'][0]
+            prior = epochs_p * self.prior['P'][0] + self.prior['t0'][0]
+            mc_m_p = np.random.normal(self.prior['P'][0], self.prior['P'][1], size=10000)
+            mc_b_p = np.random.normal(self.prior['t0'][0], self.prior['t0'][1], size=10000)
+            #mc_dPdN_p = np.random.normal(self.prior['dPdN'][0], self.prior['dPdN'][1], size=10000)
+            mc_model_p = np.expand_dims(epochs_p, -1) * mc_m_p + mc_b_p #+ 0.5 * mc_dPdN_p * np.expand_dims(epochs_p, -1) ** 2
+            diff_p = mc_model_p.T - model
+
+            # plot an invisible line so the 2nd axes are happy
+            ax2.plot(epochs, (model - prior) * 24 * 60, ls='--', color='r', alpha=0)
+
+            # why is this so small!?!?!? consistent to within machine precision?
+            # ax.plot(epochs, (model-prior)*24*60, ls='--', color='r')
+
+            if show_2sigma:
+                ax.fill_between(epochs, np.percentile(diff_p, 2, axis=0) * 24 * 60,
+                                np.percentile(diff_p, 98, axis=0) * 24 * 60, alpha=0.1, color='r',
+                                label=rf'{prior_name} ($\pm$ 2$\sigma$)')
+            else:
+                # show ~1 sigma
+                ax.fill_between(epochs, np.percentile(diff_p, 36, axis=0) * 24 * 60,
+                                np.percentile(diff_p, 64, axis=0) * 24 * 60, alpha=0.1, color='r',
+                                label=rf'{prior_name} ($\pm$ 1$\sigma$)')
+
+            if ylim == 'prior':
+                ax.set_ylim([min(np.percentile(diff_p, 1, axis=0) * 24 * 60),
+                             max(np.percentile(diff_p, 99, axis=0) * 24 * 60)])
+            elif ylim == 'average':
+                ax.set_ylim([0.5 * (min(np.percentile(diff, 1, axis=0) * 24 * 60) +
+                                    min(np.percentile(diff_p, 1, axis=0) * 24 * 60)),
+                             0.5 * (max(np.percentile(diff, 99, axis=0) * 24 * 60) +
+                                    max(np.percentile(diff_p, 99, axis=0) * 24 * 60))])
+
+        
+        # constant period model
+        ax.axhline(0, color='black', alpha=0.5, ls='--',
+                   label="Period: {:.7f}+-{:.7f} days\nT_mid: {:.7f}+-{:.7f} BJD".format(self.parameters['P'],
+                                                                                         self.errors['P'],
+                                                                                         self.parameters['t0'],
+                                                                                         self.errors['t0']))
+        
+        # dPdN model
+        model_diff = 0.5 * self.parameters['dPdN'] * epochs ** 2
+        ax.plot(epochs, model_diff * 24 * 60, color='cyan', alpha=0.5, ls='--',
+                label="dPdN: {:.2e}+-{:.2e} days/epoch".format(self.parameters['dPdN'], self.errors['dPdN']))
+
+
+        ax.legend(loc='best')
+        ax.set_xlabel("Epoch [number]", fontsize=14)
+        ax.set_ylabel("Residuals [min]", fontsize=14)
+        ax.grid(True, ls='--')
+        return fig, ax
+
+    def plot_triangle(self):
+        """ Create a posterior triangle plot of the results. """
+        ranges = []
+        mask1 = np.ones(len(self.results['weighted_samples']['logl']), dtype=bool)
+        mask2 = np.ones(len(self.results['weighted_samples']['logl']), dtype=bool)
+        mask3 = np.ones(len(self.results['weighted_samples']['logl']), dtype=bool)
+        titles = []
+        labels = []
+        flabels = {
+            'P': 'Period [day]',
+            't0': 'T_mid [JD]',
+            'dPdN': 'dPdN [day/epoch]'
+        }
+        for i, key in enumerate(self.quantiles):
+            labels.append(flabels.get(key, key))
+            titles.append(f"{self.parameters[key]:.7f} +-\n {self.errors[key]:.7f}")
+
+            # set the axes limits for the plots
+            ranges.append([
+                self.parameters[key] - 5 * self.errors[key],
+                self.parameters[key] + 5 * self.errors[key]
+            ])
+
+            if key == 'a2' or key == 'a1':
+                continue
+
+            # create masks for contouring on sigma bounds
+            mask3 = (mask3 &
+                     (self.results['weighted_samples']['points'][:, i] > (self.parameters[key] - 3 * self.errors[key])) &
+                     (self.results['weighted_samples']['points'][:, i] < (self.parameters[key] + 3 * self.errors[key])))
+
+            mask1 = (mask1 &
+                     (self.results['weighted_samples']['points'][:, i] > (self.parameters[key] - self.errors[key])) &
+                     (self.results['weighted_samples']['points'][:, i] < (self.parameters[key] + self.errors[key])))
+
+            mask2 = (mask2 &
+                     (self.results['weighted_samples']['points'][:, i] > ( self.parameters[key] - 2 * self.errors[key])) &
+                     (self.results['weighted_samples']['points'][:, i] < (self.parameters[key] + 2 * self.errors[key])))
+
+        chi2 = self.results['weighted_samples']['logl'] * -2
+        fig = corner(self.results['weighted_samples']['points'],
+                     labels=labels,
+                     bins=int(np.sqrt(self.results['samples'].shape[0])),
+                     range=ranges,
+                     figsize=(10, 10),
+                     # quantiles=(0.1, 0.84),
+                     plot_contours=True,
+                     levels=[np.percentile(chi2[mask1], 95), np.percentile(chi2[mask2], 95),
+                             np.percentile(chi2[mask3], 95)],
+                     plot_density=False,
+                     titles=titles,
+                     data_kwargs={
+                         'c': chi2,  # color code by chi2
+                         'vmin': np.percentile(chi2[mask3], 1),
+                         'vmax': np.percentile(chi2[mask3], 95),
+                         'cmap': 'viridis',
+                     },
+                     label_kwargs={'labelpad': 50, },
+                     hist_kwargs={'color': 'black', }
+                     )
+        return fig

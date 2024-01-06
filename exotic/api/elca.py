@@ -35,20 +35,19 @@
 #    EXOplanet Transit Interpretation Code (EXOTIC)
 #    # NOTE: See companion file version.py for version info.
 # ########################################################################### #
-# ########################################################################### #
 # Exoplanet light curve analysis
 #
 # Fit an exoplanet transit model to time series data.
 # ########################################################################### #
-
+from astropy.time import Time
 import copy
-import numpy as np
 from itertools import cycle
 import matplotlib.pyplot as plt
+import numpy as np
+from pylightcurve.models.exoplanet_lc import transit as pytransit
+from scipy import spatial
 from scipy.optimize import least_squares
 from scipy.signal import savgol_filter
-from scipy import spatial
-
 try:
     from ultranest import ReactiveNestedSampler
 except ImportError:
@@ -56,12 +55,11 @@ except ImportError:
     import dynesty.plotting
     from dynesty.utils import resample_equal
     from scipy.stats import gaussian_kde
+
 try:
     from plotting import corner
-except:
+except ImportError:
     from .plotting import corner
-
-from pylightcurve.models.exoplanet_lc import transit as pytransit
 
 
 def weightedflux(flux, gw, nearest):
@@ -168,6 +166,7 @@ class lc_fitter(object):
         self.verbose = verbose
         self.mode = mode
         self.neighbors = neighbors
+        self.results = None
         if self.mode == "lm":
             self.fit_LM()
         elif self.mode == "ns":
@@ -322,12 +321,10 @@ class lc_fitter(object):
                     self.results['posterior']['errup'][i]]
         except NameError:
             self.ns_type = 'dynesty'
-            dsampler = dynesty.DynamicNestedSampler(loglike, prior_transform,
-                                                    ndim=len(freekeys), bound='multi', sample='unif'
-                                                    )
+            dsampler = dynesty.DynamicNestedSampler(loglike, prior_transform, ndim=len(freekeys),
+                                                    bound='multi', sample='unif')
             dsampler.run_nested(maxcall=int(1e5), dlogz_init=0.05,
-                                maxbatch=10, nlive_batch=100
-                                )
+                                maxbatch=10, nlive_batch=100, print_progressbool=self.verbose)
             self.results = dsampler.results
 
             tests = [copy.deepcopy(self.prior) for i in range(5)]
@@ -558,7 +555,7 @@ class glc_fitter(lc_fitter):
         self.individual_fit = individual_fit
         self.stdev_cutoff = stdev_cutoff
         self.verbose = verbose
-
+        self.results = None
         self.fit_nested()
 
     def fit_nested(self):
@@ -669,6 +666,7 @@ class glc_fitter(lc_fitter):
                 detrend = self.lc_data[i]['flux']/model
                 model *= np.mean(detrend)
 
+                # add to chi2
                 chi2 += np.sum( ((self.lc_data[i]['flux']-model)/self.lc_data[i]['ferr'])**2 )
 
             # maximization metric for nested sampling
@@ -680,10 +678,11 @@ class glc_fitter(lc_fitter):
                 #clean_name = self.lc_data[n].get('name', n).replace(' ','_').replace('(','').replace(')','').replace('[','').replace(']','').replace('-','_').split('-')[0]
                 freekeys.append(f"local_{k}_{n}")
 
+        noop = lambda *args, **kwargs: None
         if self.verbose:
-            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=1e6)
+            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=1e6, show_status=True)
         else:
-            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=1e6, show_status=self.verbose, viz_callback=self.verbose)
+            self.results = ReactiveNestedSampler(freekeys, loglike, prior_transform).run(max_ncalls=1e6, show_status=False, viz_callback=noop)
 
         self.quantiles = {}
         self.errors = {}
@@ -691,23 +690,46 @@ class glc_fitter(lc_fitter):
 
         for i, key in enumerate(freekeys):
             self.parameters[key] = self.results['maximum_likelihood']['point'][i]
+            #self.errors[key] = self.results['posterior']['median'][i]
+
             self.errors[key] = self.results['posterior']['stdev'][i]
             self.quantiles[key] = [
                 self.results['posterior']['errlo'][i],
                 self.results['posterior']['errup'][i]]
 
+        # create an average Rp/Rs if it is not in global keys
+        # check if 'rprs' is in lfreekeys
+        rprs_in_local = False
+        for i in range(nobs):
+            if 'rprs' in lfreekeys[i]:
+                rprs_in_local = True
+                break
+
+        if rprs_in_local:
+            local_rprs = [] # used for creating an average value
+            local_rprs_err = []
+
+        # loop over observations
         for n in range(nobs):
             self.lc_data[n]['errors'] = {}
+            
+            # copy global parameters
+            self.lc_data[n]['priors'] = copy.deepcopy(self.parameters)
+
+            # loop over local keys and save best fit values
             for k in lfreekeys[n]:
-                #clean_name = self.lc_data[n].get('name', n).replace(' ','_').replace('(','').replace(')','').replace('[','').replace(']','').replace('-','_').split('-')[0]
+
+                # create key to get results
                 pkey = f"local_{k}_{n}"
                 
+                # overwrite priors with best fit value
                 self.lc_data[n]['priors'][k] = self.parameters[pkey]
                 self.lc_data[n]['errors'][k] = self.errors[pkey]
 
-                if k == 'rprs' and 'rprs' not in freekeys:
-                    self.parameters[k] = self.lc_data[n]['priors'][k]
-                    self.errors[k] = self.lc_data[n]['errors'][k]
+                # update key for final bestfit plot if needed
+                if k == 'rprs':
+                    local_rprs.append(self.lc_data[n]['priors'][k])
+                    local_rprs_err.append(self.lc_data[n]['errors'][k])
 
             # solve for a1
             model = transit(self.lc_data[n]['time'], self.lc_data[n]['priors'])
@@ -716,11 +738,26 @@ class glc_fitter(lc_fitter):
             self.lc_data[n]['priors']['a1'] = np.mean(detrend)
             self.lc_data[n]['residuals'] = self.lc_data[n]['flux'] - model*airmass*self.lc_data[n]['priors']['a1']
             self.lc_data[n]['detrend'] = self.lc_data[n]['flux']/(airmass*self.lc_data[n]['priors']['a1'])
+
             # phase
             self.lc_data[n]['phase'] = get_phase(self.lc_data[n]['time'], self.lc_data[n]['priors']['per'], self.lc_data[n]['priors']['tmid'])
+            self.lc_data[n]['time_upsample'] = np.linspace(min(self.lc_data[n]['time']), max(self.lc_data[n]['time']), 1000)
+            self.lc_data[n]['phase_upsample'] = get_phase(self.lc_data[n]['time_upsample'], self.lc_data[n]['priors']['per'], self.lc_data[n]['priors']['tmid'])
+            self.lc_data[n]['transit_upsample'] = transit(self.lc_data[n]['time_upsample'], self.lc_data[n]['priors'])
+
+        # create an average value from all the local fits
+        if rprs_in_local:
+            self.parameters['rprs'] = np.mean(local_rprs)
+            self.errors['rprs'] = np.std(local_rprs)
+
+        #import pdb; pdb.set_trace()
 
     def plot_bestfits(self):
         nrows = len(self.lc_data)//4+1
+        # make sure there isn't an extra row
+        if len(self.lc_data)%4 == 0:
+            nrows -= 1
+
         fig,ax = plt.subplots(nrows, 4, figsize=(5+5*nrows, 5*nrows))
 
         # turn off all axes
@@ -750,16 +787,17 @@ class glc_fitter(lc_fitter):
             if ax.ndim == 1:
                 ax[i].axis('on')
                 ax[i].errorbar(self.lc_data[i]['time'], self.lc_data[i]['flux']/airmass/detrend.mean(), yerr=self.lc_data[i]['ferr']/airmass/detrend.mean(), 
-                                ls='none', marker=nmarker, color=ncolor, alpha=0.5)
-                ax[i].plot(self.lc_data[i]['time'], model, 'r-', zorder=2)
+                                ls='none', marker=nmarker, color=ncolor, alpha=0.5, zorder=1)
+                
+                ax[i].plot(self.lc_data[i]['time_upsample'], self.lc_data[i]['transit_upsample'], 'r-', zorder=2)
                 ax[i].set_xlabel("Time [BJD]", fontsize=14)
                 ax[i].set_ylabel("Relative Flux", fontsize=14)
                 ax[i].set_title(f"{self.lc_data[i].get('name','')}", fontsize=16)
             else:
                 ax[ri,ci].axis('on')
                 ax[ri,ci].errorbar(self.lc_data[i]['time'], self.lc_data[i]['flux']/airmass/detrend.mean(), yerr=self.lc_data[i]['ferr']/airmass/detrend.mean(), 
-                                   ls='none', marker=nmarker, color=ncolor, alpha=0.5)
-                ax[ri,ci].plot(self.lc_data[i]['time'], model, 'r-', zorder=2)
+                                   ls='none', marker=nmarker, color=ncolor, alpha=0.5, zorder=1)
+                ax[ri,ci].plot(self.lc_data[i]['time_upsample'], self.lc_data[i]['transit_upsample'], 'r-', zorder=2)
                 ax[ri,ci].set_xlabel("Time[BJD]", fontsize=14)
                 ax[ri,ci].set_ylabel("Relative Flux", fontsize=14)
                 ax[ri,ci].set_title(f"{self.lc_data[i].get('name','')}", fontsize=16)
@@ -767,14 +805,40 @@ class glc_fitter(lc_fitter):
         plt.tight_layout()
         return fig
 
-    def plot_bestfit(self, title="", bin_dt=30./(60*24), alpha=0.05, phase_limits='median'):
+    def plot_bestfit(self, title="", bin_dt=30./(60*24), alpha=0.05, ylim_sigma=5, phase_limits='median', show_legend=True, limit_legend=False, show_individual_fits=False):
+        """
+        Plot the best fit model and residuals
+
+        Parameters
+        ----------
+        title : str
+            Title for the plot
+
+        bin_dt : float
+            Bin size for plotting the residuals
+
+        alpha : float
+            Alpha value for plotting the data
+
+        ylim_sigma : float
+            Number of sigma to plot the residuals
+
+        phase_limits : str
+            'median' or 'all' to set the phase limits
+
+        show_legend : bool
+            Show the legend
+
+        limit_legend : bool
+            Limit the legend to 3 entries
+        """
         f = plt.figure(figsize=(15,12))
         f.subplots_adjust(top=0.92,bottom=0.09,left=0.1,right=0.98, hspace=0)
         ax_lc = plt.subplot2grid((4,5), (0,0), colspan=5,rowspan=3)
         ax_res = plt.subplot2grid((4,5), (3,0), colspan=5, rowspan=1)
         axs = [ax_lc, ax_res]
 
-        axs[0].set_title(title)
+        axs[0].set_title(title, fontsize=18)
         axs[0].set_ylabel("Relative Flux", fontsize=14)
         axs[0].grid(True,ls='--')
 
@@ -835,13 +899,21 @@ class glc_fitter(lc_fitter):
 
             # plot binned data
             bt2, bf2, bs = time_bin(phase[si]*self.lc_data[n]['priors']['per'], self.lc_data[n]['detrend'][si], bin_dt)
-            axs[0].errorbar(bt2/self.lc_data[n]['priors']['per'],bf2,yerr=bs,alpha=1,zorder=2,color=ncolor,ls='none',marker=nmarker,
-                            label=r'{}: {:.2f} %'.format(self.lc_data[n].get('name',''),np.std(self.lc_data[n]['residuals']/np.median(self.lc_data[n]['flux'])*1e2)))
+
+            if limit_legend:
+                axs[0].errorbar(bt2/self.lc_data[n]['priors']['per'],bf2,yerr=bs,alpha=1,zorder=2,color=ncolor,ls='none',marker=nmarker)
+            else:
+                axs[0].errorbar(bt2/self.lc_data[n]['priors']['per'],bf2,yerr=bs,alpha=1,zorder=2,color=ncolor,ls='none',marker=nmarker,
+                                label=r'{}: {:.2f} %'.format(self.lc_data[n].get('name',''),np.std(self.lc_data[n]['residuals']/np.median(self.lc_data[n]['flux'])*1e2)))
 
             # replace min and max for upsampled lc model
             minp = min(minp, min(phase))
             maxp = max(maxp, max(phase))
             min_std = min(min_std, np.std(self.lc_data[n]['residuals']/np.median(self.lc_data[n]['flux'])))
+
+            # plot individual best fit models
+            if show_individual_fits:
+                axs[0].plot(self.lc_data[n]['phase_upsample'], self.lc_data[n]['transit_upsample'], color=ncolor, zorder=3, alpha=0.5)
 
         # create binned plot for all the data
         for k in alldata.keys():
@@ -862,14 +934,15 @@ class glc_fitter(lc_fitter):
         # best fit model
         self.time_upsample = np.linspace(minp*self.parameters['per']+self.parameters['tmid'], 
                                          maxp*self.parameters['per']+self.parameters['tmid'], 10000)
-        self.transit_upsample = transit(self.time_upsample, self.lc_data[0]['priors'])
+        self.transit_upsample = transit(self.time_upsample, self.parameters)
         self.phase_upsample = get_phase(self.time_upsample, self.parameters['per'], self.parameters['tmid'])
         sii = np.argsort(self.phase_upsample)
         axs[0].plot(self.phase_upsample[sii], self.transit_upsample[sii], 'r-', zorder=3, label=lclabel, lw=3)
 
+        # set up axes limits
         axs[0].set_xlim([min(self.phase_upsample), max(self.phase_upsample)])
         axs[0].set_xlabel("Phase ", fontsize=14)
-        axs[0].set_ylim([1-self.parameters['rprs']**2-5*min_std, 1+5*min_std])
+        axs[0].set_ylim([1-self.parameters['rprs']**2-ylim_sigma*min_std, 1+ylim_sigma*min_std])
         axs[1].set_xlim([min(self.phase_upsample), max(self.phase_upsample)])
         axs[1].set_xlabel("Phase", fontsize=14)
         axs[1].set_ylim([-5*min_std*1e2, 5*min_std*1e2])
@@ -902,9 +975,12 @@ class glc_fitter(lc_fitter):
             axs[1].set_xlim([min(self.phase_upsample), max(self.phase_upsample)])
 
         axs[0].get_xaxis().set_visible(False)
-        axs[0].legend(loc='best',ncol=len(self.lc_data)//7+1)
         axs[1].set_ylabel("Residuals [%]", fontsize=14)
         axs[1].grid(True,ls='--',axis='y')
+    
+        if show_legend:
+            axs[0].legend(loc='best',ncol=len(self.lc_data)//7+1)
+    
         return f,axs
 
     def plot_stack(self, title="", bin_dt=30./(60*24), dy=0.02):
